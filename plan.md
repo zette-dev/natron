@@ -1,8 +1,8 @@
 # Personal Agent — Design & Requirements
 
-**Project:** Codename `kai-go` (working title)
+**Project:** Natron
 **Owner:** Nate / Zette LLC
-**Status:** Pre-development
+**Status:** Phase 1 in progress
 **Last Updated:** February 2026
 
 -----
@@ -437,45 +437,53 @@ Secrets (bot token) are loaded from environment variables, not stored in config.
 ## 9. Go Project Structure
 
 ```
-agent/
+natron/
 ├── cmd/
-│   └── agent/
+│   └── natron/
 │       └── main.go             # Entry point, wires everything together
 ├── internal/
 │   ├── bot/
-│   │   └── bot.go              # Telegram handler, message routing, streaming
+│   │   └── bot.go              # Telegram handler, message routing, streaming edits
 │   ├── session/
 │   │   ├── manager.go          # Session lifecycle, chat ID → session mapping
-│   │   └── session.go          # Session struct, timer management
+│   │   ├── manager_test.go     # 10 tests: lifecycle, timeout, concurrency
+│   │   └── session.go          # Session struct, per-chat mutex, timer
 │   ├── executor/
 │   │   ├── executor.go         # Executor interface, Event, SessionContext types
 │   │   ├── claude/
-│   │   │   └── claude.go       # ClaudeExecutor — claude CLI, stream-json, CLAUDE.md
-│   │   ├── codex/
-│   │   │   └── codex.go        # CodexExecutor — codex CLI, AGENTS.md
-│   │   ├── opencode/
-│   │   │   └── opencode.go     # OpenCodeExecutor — opencode CLI
+│   │   │   ├── claude.go       # ClaudeExecutor — stream-json subprocess bridge
+│   │   │   └── claude_test.go  # 14 tests: NDJSON parsing, pipe simulation, multi-turn
+│   │   ├── codex/              # (planned) CodexExecutor
+│   │   ├── opencode/           # (planned) OpenCodeExecutor
 │   │   └── mock/
 │   │       └── mock.go         # MockExecutor for testing
-│   ├── memory/
+│   ├── memory/                 # (Phase 2)
 │   │   ├── store.go            # SQLite read/write for memories
 │   │   ├── history.go          # JSONL conversation log read/write
 │   │   └── briefing.go         # Cortex briefing generation goroutine
-│   ├── workspace/
+│   ├── workspace/              # (Phase 3) — currently resolved inline in session manager
 │   │   └── manager.go          # Chat ID → workspace path resolution
 │   └── config/
-│       └── config.go           # YAML config loading, validation
+│       └── config.go           # YAML config loading, env var expansion, validation
 ├── workspaces/                 # Runtime workspace directories (gitignored)
-├── config.yaml
+├── config.yaml                 # Local config (gitignored, contains bot token)
+├── config.example.yaml         # Template config (committed)
 ├── go.mod
 └── go.sum
 ```
 
+**Module:** `github.com/zette-dev/natron`
+
 **Key dependencies:**
 
-- `github.com/go-telegram-bot-api/telegram-bot-api/v5` — Telegram
-- `modernc.org/sqlite` — Pure Go SQLite (no CGo, truly self-contained binary)
+- `github.com/go-telegram/bot` v1.18.0 — Telegram (actively maintained, on Telegram's official list)
+- `modernc.org/sqlite` — Pure Go SQLite, no CGo (Phase 2)
 - `gopkg.in/yaml.v3` — Config parsing
+
+**Dependency decisions:**
+
+- `go-telegram-bot-api/v5` (originally planned) was rejected — abandoned since 2021.
+- Claude Code subprocess bridge built from scratch rather than using community SDKs (`yukifoo/claude-code-sdk-go` is one-shot only; `schlunsen/claude-agent-sdk-go` was used as architectural reference but not as a dependency). No official Anthropic Go SDK exists for CLI subprocess integration.
 
 -----
 
@@ -578,13 +586,24 @@ Folder conventions:
 
 Get a working Telegram → Claude Code → Telegram loop with session lifecycle.
 
-- Go project scaffold
-- Telegram long polling and message routing
-- Claude Code subprocess bridge with streaming
-- Session manager with 10-minute inactivity timeout
-- Basic chat-to-workspace mapping
-- Home `CLAUDE.md` with identity and instructions
-- Launchd service setup
+- [x] Go project scaffold (`github.com/zette-dev/natron`, Go 1.24)
+- [x] Telegram long polling and message routing (`go-telegram/bot` v1.18.0)
+- [x] Claude Code subprocess bridge with streaming (stream-json protocol, built from scratch)
+- [x] Session manager with 10-minute inactivity timeout (per-chat locks, dead executor recovery)
+- [x] Basic chat-to-workspace mapping (config-driven, defaults to `home`)
+- [x] Config loader with env var expansion and validation
+- [x] Test suite: 24 tests (14 executor, 10 session manager)
+- [x] First successful Telegram → Claude Code → Telegram round-trip (Feb 18, 2026)
+- [ ] Home `CLAUDE.md` with identity and instructions
+- [ ] Launchd service setup
+- [ ] Multi-turn conversation verification (back-and-forth within one session)
+- [ ] Session expiry verified end-to-end
+
+> **Checkpoint (2026-02-18 00:49):** Core loop functional. Go binary starts, connects to
+> Telegram via long polling, spawns Claude Code subprocess on first message, streams response
+> back. Built with `go-telegram/bot` (not the abandoned `go-telegram-bot-api`), custom
+> stream-json executor (not a community SDK). 24 tests pass. First real Telegram message
+> successfully triggered a Claude Code session.
 
 **Success criteria:** Can send a message on Telegram, have a real back-and-forth conversation with Claude Code, session expires cleanly after inactivity.
 
