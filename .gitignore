@@ -1,0 +1,23 @@
+# Binary
+natron
+
+# Config with secrets
+config.yaml
+
+# Runtime data
+workspaces/
+*.db
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Go
+*.test
+*.out
+
+# Firebase debug log (stray file)
+firebase-debug.log

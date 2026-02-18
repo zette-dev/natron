@@ -1,0 +1,25 @@
+telegram:
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  allowed_user_ids:
+    - 123456789
+
+session:
+  inactivity_timeout: 10m
+  max_response_length: 4096
+  edit_interval: 2s
+
+claude:
+  model: sonnet
+  max_budget_usd: 10.0
+
+workspaces:
+  base_path: /Users/nate/agent/workspaces
+  chat_map:
+    "-1001234567890": zette
+    "-1009876543210": fitness
+  default: home
+
+memory:
+  db_path: /Users/nate/agent/agent.db
+  briefing_interval: 30m
+  history_messages: 20
