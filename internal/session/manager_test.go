@@ -15,8 +15,7 @@ func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	return config.Config{
 		Session: config.SessionConfig{
-			InactivityTimeout: 5 * time.Second,
-			EditInterval:      1 * time.Second,
+			EditInterval: 1 * time.Second,
 		},
 		Workspaces: config.WorkspacesConfig{
 			BasePath: t.TempDir(),
@@ -78,7 +77,7 @@ func TestManager_CreateSession(t *testing.T) {
 	mgr := NewManager(cfg, func() executor.Executor { return &created })
 
 	ctx := context.Background()
-	events, err := mgr.Send(ctx, 100, "hello")
+	events, err := mgr.Send(ctx, 100, "", "", "hello")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -105,12 +104,12 @@ func TestManager_ReuseSession(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := mgr.Send(ctx, 200, "first")
+	_, err := mgr.Send(ctx, 200, "", "", "first")
 	if err != nil {
 		t.Fatalf("first Send: %v", err)
 	}
 
-	_, err = mgr.Send(ctx, 200, "second")
+	_, err = mgr.Send(ctx, 200, "", "", "second")
 	if err != nil {
 		t.Fatalf("second Send: %v", err)
 	}
@@ -129,8 +128,8 @@ func TestManager_DifferentChatsGetDifferentSessions(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	mgr.Send(ctx, 300, "a")
-	mgr.Send(ctx, 400, "b")
+	mgr.Send(ctx, 300, "", "", "a")
+	mgr.Send(ctx, 400, "", "", "b")
 
 	if startCount != 2 {
 		t.Errorf("expected 2 factory calls for 2 chats, got %d", startCount)
@@ -149,7 +148,7 @@ func TestManager_DeadExecutorRecovery(t *testing.T) {
 	ctx := context.Background()
 
 	// First message — creates session
-	_, err := mgr.Send(ctx, 500, "first")
+	_, err := mgr.Send(ctx, 500, "", "", "first")
 	if err != nil {
 		t.Fatalf("first Send: %v", err)
 	}
@@ -165,7 +164,7 @@ func TestManager_DeadExecutorRecovery(t *testing.T) {
 	sess.exec.Stop() // sets alive=false
 
 	// Second message — should detect dead executor and create a new session
-	_, err = mgr.Send(ctx, 500, "second")
+	_, err = mgr.Send(ctx, 500, "", "", "second")
 	if err != nil {
 		t.Fatalf("second Send after death: %v", err)
 	}
@@ -186,8 +185,8 @@ func TestManager_Shutdown(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	mgr.Send(ctx, 600, "a")
-	mgr.Send(ctx, 700, "b")
+	mgr.Send(ctx, 600, "", "", "a")
+	mgr.Send(ctx, 700, "", "", "b")
 
 	mgr.Shutdown()
 
@@ -201,96 +200,112 @@ func TestManager_Shutdown(t *testing.T) {
 	}
 }
 
-func TestManager_InactivityTimeout(t *testing.T) {
+func TestManager_Reset(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Session.InactivityTimeout = 100 * time.Millisecond
+	startCount := 0
+	var lastExec *mockExec
 
-	var exec mockExec
-	mgr := NewManager(cfg, func() executor.Executor { return &exec })
+	mgr := NewManager(cfg, func() executor.Executor {
+		startCount++
+		lastExec = &mockExec{}
+		return lastExec
+	})
 
 	ctx := context.Background()
-	_, err := mgr.Send(ctx, 800, "hello")
-	if err != nil {
-		t.Fatalf("Send: %v", err)
+	mgr.Send(ctx, 800, "", "", "hello")
+	if startCount != 1 {
+		t.Fatalf("expected 1 start, got %d", startCount)
 	}
 
-	// Wait for the timeout to fire
-	time.Sleep(300 * time.Millisecond)
+	mgr.Reset(800)
 
-	// Session should have been expired
-	mgr.mu.Lock()
-	_, exists := mgr.sessions[int64(800)]
-	mgr.mu.Unlock()
-
-	if exists {
-		t.Error("session should have been expired by inactivity timeout")
+	if lastExec.stopped != 1 {
+		t.Errorf("Reset: expected executor to be stopped, got %d", lastExec.stopped)
 	}
-	if exec.stopped != 1 {
-		t.Errorf("expected executor to be stopped, stopped count: %d", exec.stopped)
+
+	// Next send creates a fresh session
+	mgr.Send(ctx, 800, "", "", "after reset")
+	if startCount != 2 {
+		t.Errorf("expected 2 starts after reset, got %d", startCount)
 	}
 }
 
-func TestManager_TouchResetsTimeout(t *testing.T) {
+func TestManager_Status(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Session.InactivityTimeout = 200 * time.Millisecond
-
 	mgr := NewManager(cfg, func() executor.Executor { return &mockExec{} })
 
 	ctx := context.Background()
 
-	// Send first message
-	mgr.Send(ctx, 900, "first")
-
-	// Wait 150ms (within the 200ms timeout), then send another message
-	time.Sleep(150 * time.Millisecond)
-	mgr.Send(ctx, 900, "second") // should reset the timer
-
-	// Wait another 150ms — total 300ms since first message, but only 150ms since last
-	time.Sleep(150 * time.Millisecond)
-
-	mgr.mu.Lock()
-	_, exists := mgr.sessions[int64(900)]
-	mgr.mu.Unlock()
-
-	if !exists {
-		t.Error("session should still exist — touch should have reset the timeout")
+	// No session yet
+	info := mgr.Status(800)
+	if info.Exists {
+		t.Error("expected no session before first Send")
 	}
 
-	// Now wait for it to actually expire
-	time.Sleep(200 * time.Millisecond)
+	before := time.Now()
+	mgr.Send(ctx, 800, "", "", "hello")
+	after := time.Now()
 
-	mgr.mu.Lock()
-	_, exists = mgr.sessions[int64(900)]
-	mgr.mu.Unlock()
+	info = mgr.Status(800)
+	if !info.Exists {
+		t.Error("expected session to exist after Send")
+	}
+	if info.Workspace == "" {
+		t.Error("expected non-empty workspace")
+	}
+	if info.CreatedAt.Before(before) || info.CreatedAt.After(after) {
+		t.Errorf("CreatedAt %v outside expected range [%v, %v]", info.CreatedAt, before, after)
+	}
 
-	if exists {
-		t.Error("session should have expired after full timeout without activity")
+	// After reset, status should show no session
+	mgr.Reset(800)
+	info = mgr.Status(800)
+	if info.Exists {
+		t.Error("expected no session after Reset")
 	}
 }
 
 func TestManager_WorkspaceMapping(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Workspaces.ChatMap = map[string]string{
-		"1000": "zette",
+		"1000":        "zette",
+		"@teamchat":   "team",
+		"teamchat":    "team",
+		"Family Chat": "family",
 	}
 
-	var startedWorkDir string
-	mgr := NewManager(cfg, func() executor.Executor {
-		return &mockExec{}
-	})
+	mgr := NewManager(cfg, func() executor.Executor { return &mockExec{} })
 
-	// Patch factory to capture the workdir — we need to check resolveWorkDir
-	workDir := mgr.resolveWorkDir(1000)
+	// Numeric ID lookup
+	workDir := mgr.resolveWorkDir(1000, "", "")
 	if workDir != cfg.Workspaces.BasePath+"/zette" {
-		t.Errorf("expected zette workspace, got %q", workDir)
+		t.Errorf("numeric ID: expected zette workspace, got %q", workDir)
 	}
 
-	workDir = mgr.resolveWorkDir(9999)
+	// Default fallback
+	workDir = mgr.resolveWorkDir(9999, "", "")
 	if workDir != cfg.Workspaces.BasePath+"/home" {
-		t.Errorf("expected default home workspace, got %q", workDir)
+		t.Errorf("default: expected home workspace, got %q", workDir)
 	}
 
-	_ = startedWorkDir
+	// Username with @ prefix in config, passed without @
+	workDir = mgr.resolveWorkDir(0, "teamchat", "")
+	if workDir != cfg.Workspaces.BasePath+"/team" {
+		t.Errorf("@username: expected team workspace, got %q", workDir)
+	}
+
+	// Title lookup
+	workDir = mgr.resolveWorkDir(0, "", "Family Chat")
+	if workDir != cfg.Workspaces.BasePath+"/family" {
+		t.Errorf("title: expected family workspace, got %q", workDir)
+	}
+
+	// Username takes priority over title
+	cfg.Workspaces.ChatMap["myfamily"] = "other"
+	workDir = mgr.resolveWorkDir(0, "myfamily", "Family Chat")
+	if workDir != cfg.Workspaces.BasePath+"/other" {
+		t.Errorf("priority: expected username to win over title, got %q", workDir)
+	}
 }
 
 func TestManager_ConcurrentSendsSameChat(t *testing.T) {
@@ -334,7 +349,7 @@ func TestManager_ConcurrentSendsSameChat(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			events, err := mgr.Send(ctx, 1100, fmt.Sprintf("msg-%d", i))
+			events, err := mgr.Send(ctx, 1100, "", "", fmt.Sprintf("msg-%d", i))
 			if err != nil {
 				t.Errorf("send %d: %v", i, err)
 				return

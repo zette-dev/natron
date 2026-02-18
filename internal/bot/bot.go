@@ -13,14 +13,23 @@ import (
 
 	"github.com/zette-dev/natron/internal/config"
 	"github.com/zette-dev/natron/internal/executor"
+	"github.com/zette-dev/natron/internal/session"
 )
 
 const maxMessageLen = 4096
 
-// SessionProvider is the interface the bot uses to get an executor for a chat.
+// SessionProvider is the interface the bot uses to interact with sessions.
 type SessionProvider interface {
 	// Send routes a message to the appropriate session and returns streamed events.
-	Send(ctx context.Context, chatID int64, message string) (<-chan executor.Event, error)
+	// username is the Telegram @username without the @ prefix (empty for DMs or
+	// private groups without a username). title is the group/channel display name.
+	Send(ctx context.Context, chatID int64, username, title, message string) (<-chan executor.Event, error)
+
+	// Reset stops the active session for chatID so the next message starts fresh.
+	Reset(chatID int64)
+
+	// Status returns the current session state for chatID.
+	Status(chatID int64) session.StatusInfo
 }
 
 // Bot wraps the Telegram bot and routes messages to sessions.
@@ -48,6 +57,8 @@ func New(cfg config.TelegramConfig, editInterval time.Duration, sessions Session
 
 	opts := []bot.Option{
 		bot.WithMiddlewares(b.authMiddleware),
+		bot.WithMessageTextHandler("/new", bot.MatchTypePrefix, b.handleNew),
+		bot.WithMessageTextHandler("/status", bot.MatchTypePrefix, b.handleStatus),
 		bot.WithDefaultHandler(b.handleMessage),
 	}
 
@@ -86,7 +97,8 @@ func (b *Bot) handleMessage(ctx context.Context, tg *bot.Bot, update *models.Upd
 		return
 	}
 
-	chatID := update.Message.Chat.ID
+	chat := update.Message.Chat
+	chatID := chat.ID
 	text := update.Message.Text
 
 	// Send typing indicator
@@ -95,7 +107,7 @@ func (b *Bot) handleMessage(ctx context.Context, tg *bot.Bot, update *models.Upd
 		Action: models.ChatActionTyping,
 	})
 
-	events, err := b.sessions.Send(ctx, chatID, text)
+	events, err := b.sessions.Send(ctx, chatID, chat.Username, chat.Title, text)
 	if err != nil {
 		slog.Error("session send failed", "chat_id", chatID, "error", err)
 		tg.SendMessage(ctx, &bot.SendMessageParams{
@@ -108,32 +120,100 @@ func (b *Bot) handleMessage(ctx context.Context, tg *bot.Bot, update *models.Upd
 	b.streamResponse(ctx, tg, chatID, events)
 }
 
+// handleNew clears the active session so the next message starts a fresh conversation.
+func (b *Bot) handleNew(ctx context.Context, tg *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+	b.sessions.Reset(chatID)
+	tg.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   "Session cleared. Starting fresh.",
+	})
+}
+
+// handleStatus reports the current session state for the chat.
+func (b *Bot) handleStatus(ctx context.Context, tg *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+	info := b.sessions.Status(chatID)
+
+	var text string
+	if !info.Exists {
+		text = "No active session. Send a message to start one."
+	} else {
+		age := time.Since(info.CreatedAt).Round(time.Second)
+		text = fmt.Sprintf("Active since %s (%s ago)\nWorkspace: %s",
+			info.CreatedAt.Format("15:04"),
+			formatDuration(age),
+			info.Workspace,
+		)
+	}
+
+	tg.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+	})
+}
+
+// formatDuration returns a human-readable duration string (e.g. "2h 5m", "45s").
+func formatDuration(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
 // streamResponse sends an initial message and edits it in place as events
 // arrive. Splits into new messages if the response exceeds 4096 chars.
+// Intermediate edits are plain text; the final edit uses MarkdownV2.
 func (b *Bot) streamResponse(ctx context.Context, tg *bot.Bot, chatID int64, events <-chan executor.Event) {
 	var (
-		msgID     int
-		buf       strings.Builder
-		lastEdit  string
-		ticker    = time.NewTicker(b.editIvl)
+		msgID    int
+		buf      strings.Builder
+		lastEdit string
+		ticker   = time.NewTicker(b.editIvl)
 	)
 	defer ticker.Stop()
 
-	flush := func() {
-		text := buf.String()
-		if text == "" || text == lastEdit {
+	flush := func(final bool) {
+		raw := buf.String()
+		if raw == "" {
+			return
+		}
+
+		var sendText string
+		var parseMode models.ParseMode
+		if final {
+			sendText = formatV2(raw)
+			parseMode = models.ParseModeMarkdown // maps to "MarkdownV2" in this library
+		} else {
+			sendText = raw
+		}
+
+		if sendText == lastEdit {
 			return
 		}
 
 		// Truncate to max length for current message
-		if utf8.RuneCountInString(text) > maxMessageLen {
-			text = truncateRunes(text, maxMessageLen-3) + "..."
+		if utf8.RuneCountInString(sendText) > maxMessageLen {
+			sendText = truncateRunes(sendText, maxMessageLen-3) + "..."
 		}
 
 		if msgID == 0 {
 			sent, err := tg.SendMessage(ctx, &bot.SendMessageParams{
-				ChatID: chatID,
-				Text:   text,
+				ChatID:    chatID,
+				Text:      sendText,
+				ParseMode: parseMode,
 			})
 			if err != nil {
 				slog.Error("send message failed", "error", err)
@@ -144,13 +224,14 @@ func (b *Bot) streamResponse(ctx context.Context, tg *bot.Bot, chatID int64, eve
 			_, err := tg.EditMessageText(ctx, &bot.EditMessageTextParams{
 				ChatID:    chatID,
 				MessageID: msgID,
-				Text:      text,
+				Text:      sendText,
+				ParseMode: parseMode,
 			})
 			if err != nil {
 				slog.Debug("edit message failed", "error", err)
 			}
 		}
-		lastEdit = text
+		lastEdit = sendText
 	}
 
 	for {
@@ -158,7 +239,7 @@ func (b *Bot) streamResponse(ctx context.Context, tg *bot.Bot, chatID int64, eve
 		case evt, ok := <-events:
 			if !ok {
 				// Channel closed — final flush
-				flush()
+				flush(true)
 				return
 			}
 
@@ -167,7 +248,7 @@ func (b *Bot) streamResponse(ctx context.Context, tg *bot.Bot, chatID int64, eve
 				// If adding this text would exceed the limit, flush current
 				// message and start a new one.
 				if utf8.RuneCountInString(buf.String())+utf8.RuneCountInString(evt.Text) > maxMessageLen {
-					flush()
+					flush(true)
 					buf.Reset()
 					lastEdit = ""
 					msgID = 0
@@ -180,7 +261,7 @@ func (b *Bot) streamResponse(ctx context.Context, tg *bot.Bot, chatID int64, eve
 					buf.Reset()
 					buf.WriteString(evt.Text)
 				}
-				flush()
+				flush(true)
 				return
 
 			case executor.EventError:
@@ -188,12 +269,12 @@ func (b *Bot) streamResponse(ctx context.Context, tg *bot.Bot, chatID int64, eve
 				if buf.Len() == 0 {
 					buf.WriteString("An error occurred while processing your message.")
 				}
-				flush()
+				flush(false)
 				return
 			}
 
 		case <-ticker.C:
-			flush()
+			flush(false)
 
 		case <-ctx.Done():
 			return
@@ -211,4 +292,106 @@ func truncateRunes(s string, n int) string {
 		i++
 	}
 	return s
+}
+
+// formatV2 converts Claude markdown output to Telegram MarkdownV2.
+//
+// Code fences (``` ... ```) are preserved with their language hint; content
+// inside is escaped (only \ and ` need escaping in a code block). Inline code
+// spans (` ... `) are preserved similarly. All other MarkdownV2 special
+// characters are escaped in plain-text segments so the message is never
+// rejected by Telegram. Bold/italic/headers are not converted — they render
+// as their literal characters, which is readable.
+func formatV2(text string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			out = append(out, line) // fence delimiters pass through unchanged
+			continue
+		}
+		if inFence {
+			// Escape only backslash and backtick inside code blocks.
+			line = strings.ReplaceAll(line, `\`, `\\`)
+			line = strings.ReplaceAll(line, "`", "\\`")
+			out = append(out, line)
+		} else {
+			out = append(out, escapeV2Line(line))
+		}
+	}
+
+	// If input had an unclosed fence, close it so Telegram doesn't reject it.
+	if inFence {
+		out = append(out, "```")
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// escapeV2Line escapes a single plain-text line for Telegram MarkdownV2.
+// Inline code spans (` ... `) and bold spans (**...**) are preserved and
+// converted to their MarkdownV2 equivalents. Everything else has special
+// characters escaped with a backslash.
+func escapeV2Line(line string) string {
+	var out strings.Builder
+	i := 0
+	for i < len(line) {
+		// Inline code span: `...`
+		if line[i] == '`' {
+			j := strings.IndexByte(line[i+1:], '`')
+			if j >= 0 {
+				j += i + 1 // absolute index of closing backtick
+				out.WriteByte('`')
+				// Inside inline code: escape only backslash.
+				content := strings.ReplaceAll(line[i+1:j], `\`, `\\`)
+				out.WriteString(content)
+				out.WriteByte('`')
+				i = j + 1
+				continue
+			}
+			// No closing backtick — escape it as a literal character.
+			out.WriteString("\\`")
+			i++
+			continue
+		}
+
+		// Bold span: **...** → *...*  (MarkdownV2 bold uses single *)
+		if i+1 < len(line) && line[i] == '*' && line[i+1] == '*' {
+			j := strings.Index(line[i+2:], "**")
+			if j >= 0 {
+				j += i + 2 // absolute index of closing **
+				out.WriteByte('*')
+				for _, r := range line[i+2 : j] {
+					if isV2Special(r) {
+						out.WriteByte('\\')
+					}
+					out.WriteRune(r)
+				}
+				out.WriteByte('*')
+				i = j + 2
+				continue
+			}
+			// No closing ** — escape both asterisks as literals.
+			out.WriteString("\\*\\*")
+			i += 2
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if isV2Special(r) {
+			out.WriteByte('\\')
+		}
+		out.WriteRune(r)
+		i += size
+	}
+	return out.String()
+}
+
+// isV2Special reports whether r must be escaped in Telegram MarkdownV2.
+func isV2Special(r rune) bool {
+	const special = `\_*[]()~` + "`" + `>#+-=|{}.!`
+	return strings.ContainsRune(special, r)
 }

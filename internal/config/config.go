@@ -22,7 +22,6 @@ type TelegramConfig struct {
 }
 
 type SessionConfig struct {
-	InactivityTimeout time.Duration `yaml:"inactivity_timeout"`
 	MaxResponseLength int           `yaml:"max_response_length"`
 	EditInterval      time.Duration `yaml:"edit_interval"`
 }
@@ -77,9 +76,6 @@ func (c *Config) validate() error {
 	}
 
 	// Apply defaults
-	if c.Session.InactivityTimeout == 0 {
-		c.Session.InactivityTimeout = 10 * time.Minute
-	}
 	if c.Session.MaxResponseLength == 0 {
 		c.Session.MaxResponseLength = 4096
 	}

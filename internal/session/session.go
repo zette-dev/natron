@@ -12,14 +12,6 @@ type Session struct {
 	chatID    int64
 	workspace string
 	exec      executor.Executor
-	lastAct   time.Time
-	timer     *time.Timer
-	timeout   time.Duration
+	createdAt time.Time
 	mu        sync.Mutex
-}
-
-// touch resets the inactivity timer.
-func (s *Session) touch() {
-	s.lastAct = time.Now()
-	s.timer.Reset(s.timeout)
 }
