@@ -1,6 +1,12 @@
 # Binary
 natron
 
+# Build output
+dist/
+
+# Temp tap clone during release
+.homebrew-tap/
+
 # Config with secrets
 config.yaml
 

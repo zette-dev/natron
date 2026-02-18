@@ -29,6 +29,8 @@ type SessionConfig struct {
 type ClaudeConfig struct {
 	Model        string  `yaml:"model"`
 	MaxBudgetUSD float64 `yaml:"max_budget_usd"`
+	SoulPath     string  `yaml:"soul_path"`
+	MemoryPath   string  `yaml:"memory_path"`
 }
 
 type WorkspacesConfig struct {
@@ -87,6 +89,16 @@ func (c *Config) validate() error {
 	}
 	if c.Workspaces.Default == "" {
 		c.Workspaces.Default = "home"
+	}
+	if c.Claude.SoulPath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			c.Claude.SoulPath = home + "/.natron/soul.md"
+		}
+	}
+	if c.Claude.MemoryPath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			c.Claude.MemoryPath = home + "/.natron/memory.md"
+		}
 	}
 	if c.Memory.HistoryMessages == 0 {
 		c.Memory.HistoryMessages = 20

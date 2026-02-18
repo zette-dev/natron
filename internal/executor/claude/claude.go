@@ -54,7 +54,7 @@ func (e *Executor) Alive() bool {
 }
 
 // Start spawns the Claude Code subprocess in the given working directory.
-func (e *Executor) Start(ctx context.Context, workDir string, _ executor.SessionContext) error {
+func (e *Executor) Start(ctx context.Context, workDir string, sessionCtx executor.SessionContext) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -71,6 +71,9 @@ func (e *Executor) Start(ctx context.Context, workDir string, _ executor.Session
 		"--output-format", "stream-json",
 		"--verbose",
 		"--model", e.model,
+	}
+	if sessionCtx.IdentityDoc != "" {
+		args = append(args, "--append-system-prompt", sessionCtx.IdentityDoc)
 	}
 
 	e.cmd = exec.CommandContext(procCtx, "claude", args...)

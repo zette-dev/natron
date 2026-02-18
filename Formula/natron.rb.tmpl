@@ -1,0 +1,20 @@
+class Natron < Formula
+  desc "Telegram bot that bridges messages to Claude Code"
+  homepage "https://github.com/zette-dev/natron"
+  version "{{VERSION}}"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/zette-dev/natron/releases/download/v{{VERSION}}/natron_darwin_arm64"
+      sha256 "{{SHA_ARM64}}"
+    end
+    on_intel do
+      url "https://github.com/zette-dev/natron/releases/download/v{{VERSION}}/natron_darwin_amd64"
+      sha256 "{{SHA_AMD64}}"
+    end
+  end
+
+  def install
+    bin.install Dir["natron_darwin_*"].first => "natron"
+  end
+end

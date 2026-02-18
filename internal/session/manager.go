@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -132,7 +133,7 @@ func (m *Manager) getOrCreate(ctx context.Context, chatID int64, username, title
 	workDir := m.resolveWorkDir(chatID, username, title)
 	exec := m.factory()
 
-	if err := exec.Start(ctx, workDir, executor.SessionContext{}); err != nil {
+	if err := exec.Start(ctx, workDir, executor.SessionContext{IdentityDoc: m.loadIdentity()}); err != nil {
 		return nil, fmt.Errorf("start executor for chat %d: %w", chatID, err)
 	}
 
@@ -157,6 +158,22 @@ func (m *Manager) remove(chatID int64) {
 		delete(m.sessions, chatID)
 		slog.Info("session removed", "chat_id", chatID)
 	}
+}
+
+// loadIdentity reads the soul and memory files and combines them into a
+// single string for use as a system prompt addition. Missing files are
+// silently skipped — neither is required for the bot to function.
+func (m *Manager) loadIdentity() string {
+	var parts []string
+
+	if soul, err := os.ReadFile(m.cfg.Claude.SoulPath); err == nil && len(soul) > 0 {
+		parts = append(parts, strings.TrimSpace(string(soul)))
+	}
+	if memory, err := os.ReadFile(m.cfg.Claude.MemoryPath); err == nil && len(memory) > 0 {
+		parts = append(parts, "---\n\n## Shared Memory\n\n"+strings.TrimSpace(string(memory)))
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // resolveWorkDir maps a chat to its workspace directory. Resolution order:
